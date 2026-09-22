@@ -1,0 +1,60 @@
+[
+  {
+    "instance": "ApisHive",
+    "item_name": "Worker.Signal1",
+    "attributes": [
+      {
+        "attrib_id": "10",
+        "value": "attr-value-0-0"
+      }
+    ]
+  },
+  {
+    "instance": "ApisHive",
+    "item_name": "Worker.Signal2",
+    "attributes": [
+      {
+        "attrib_id": "10",
+        "value": "xray-540"
+      }
+    ]
+  },
+  {
+    "instance": "ApisHive",
+    "item_name": "Logger.Temperature",
+    "attributes": [
+      {
+        "attrib_id": "10",
+        "value": "quebec-459"
+      },
+      {
+        "attrib_id": "11",
+        "value": "foxtrot-820"
+      }
+    ]
+  },
+  {
+    "instance": "ApisHive",
+    "item_name": "Logger.Pressure",
+    "attributes": [
+      {
+        "attrib_id": "10",
+        "value": "romeo-492"
+      },
+      {
+        "attrib_id": "11",
+        "value": "xray-780"
+      }
+    ]
+  },
+  {
+    "instance": "ApisHive",
+    "item_name": "Simulator.Sine1",
+    "attributes": [
+      {
+        "attrib_id": "10",
+        "value": "attr-value-4-0"
+      }
+    ]
+  }
+]
