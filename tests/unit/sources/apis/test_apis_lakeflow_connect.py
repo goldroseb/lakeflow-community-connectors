@@ -53,19 +53,21 @@ from tests.unit.sources.test_suite import LakeflowConnectTests
 SIM_INSTANCE = "ApisHive"
 
 #: Wire timestamps (``single_value_t.value.t``) in the corpus, in order.
+#: Space-separated, no timezone suffix — CONFIRMED live (2026-09-23) as the
+#: source's real format, not the ISO-8601 originally assumed here.
 VALUES_TIMESTAMPS = [
-    "2024-01-01T00:00:00Z",
-    "2024-01-01T01:00:00Z",
-    "2024-01-01T02:00:00Z",
-    "2024-01-01T03:00:00Z",
-    "2024-01-01T04:00:00Z",
+    "2024-01-01 00:00:00",
+    "2024-01-01 01:00:00",
+    "2024-01-01 02:00:00",
+    "2024-01-01 03:00:00",
+    "2024-01-01 04:00:00",
 ]
 TIMESERIES_TIMESTAMPS = [
-    "2024-01-01T00:00:00Z",
-    "2024-01-01T00:15:00Z",
-    "2024-01-01T00:30:00Z",
-    "2024-01-01T00:45:00Z",
-    "2024-01-01T01:00:00Z",
+    "2024-01-01 00:00:00",
+    "2024-01-01 00:15:00",
+    "2024-01-01 00:30:00",
+    "2024-01-01 00:45:00",
+    "2024-01-01 01:00:00",
 ]
 
 

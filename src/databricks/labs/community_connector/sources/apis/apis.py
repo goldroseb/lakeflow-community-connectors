@@ -90,6 +90,7 @@ from databricks.labs.community_connector.sources.apis.apis_schemas import (
     TABLE_METADATA,
     TABLE_SCHEMAS,
     TIMESTAMP_FORMAT,
+    WIRE_TIMESTAMP_FORMAT,
 )
 
 logger = logging.getLogger(__name__)
@@ -570,7 +571,7 @@ class ApisLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
             "format": RESPONSE_FORMAT,
         }
         if updated_since:
-            params["updatedSince"] = updated_since
+            params["updatedSince"] = _to_wire_timestamp(updated_since)
         quality = _resolve_quality(table_options)
         if quality:
             params["quality"] = quality
@@ -598,8 +599,8 @@ class ApisLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
         """
         params: dict[str, Any] = {
             "item": list(patterns),
-            "starttime": start_iso,
-            "endtime": end_iso,
+            "starttime": _to_wire_timestamp(start_iso),
+            "endtime": _to_wire_timestamp(end_iso),
             "format": RESPONSE_FORMAT,
         }
         quality = _resolve_quality(table_options)
@@ -1148,6 +1149,18 @@ def _format_iso(value: datetime) -> str:
 
 def _normalize_timestamp(value: str) -> str:
     return _format_iso(_parse_iso(value))
+
+
+def _to_wire_timestamp(iso_value: str) -> str:
+    """Convert an internal ISO-8601 cursor/offset value into the format the
+    source actually accepts on the wire (CONFIRMED live, 2026-09-23) for
+    ``updatedSince``/``starttime``/``endtime`` request parameters — see
+    ``WIRE_TIMESTAMP_FORMAT`` in ``apis_schemas.py`` for why this differs
+    from ISO-8601. Apply this only when placing a timestamp into an actual
+    HTTP request parameter, never to values used for internal cursor
+    arithmetic or comparisons.
+    """
+    return _parse_iso(iso_value).strftime(WIRE_TIMESTAMP_FORMAT)
 
 
 def _add_seconds(iso_value: str, seconds: int) -> str:

@@ -282,14 +282,33 @@ DEFAULT_ITEM_PATTERN = "*"
 #: Format is always JSON — the spec defines no CSV schema.
 RESPONSE_FORMAT = "json"
 
-#: Timestamp rendering for ``updatedSince`` / ``starttime`` / ``endtime``.
-#: ``apis_datetime_format`` also accepts relative "OPC time" expressions
-#: (``DAY-1D``), but incremental reads must be deterministic and replayable,
-#: so the connector always computes and sends absolute ISO-8601 instants.
-#: Second precision with a ``Z`` suffix matches the spec's own example
-#: (``2023-06-01T12:00:00Z``).
+#: Internal cursor/offset representation ONLY (checkpoints, ``_init_time``,
+#: ``_add_seconds`` arithmetic). Kept as clean ISO-8601 for readability and
+#: because it is never sent to the source directly — see
+#: ``WIRE_TIMESTAMP_FORMAT`` below for what actually goes on the wire.
 TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 EPOCH_ISO = "1970-01-01T00:00:00Z"
+
+#: The actual wire format for ``updatedSince`` / ``starttime`` / ``endtime``
+#: request parameters — CONFIRMED via a live spot-check (2026-09-23) against
+#: a real Prediktor Apis Hive instance. This directly contradicts what was
+#: previously assumed here: the spec's own example (``2023-06-01T12:00:00Z``)
+#: suggested ISO-8601, and an initial live probe using that exact format
+#: even *appeared* to succeed (200, empty body) for a fully-past 2024 date —
+#: but every subsequent ISO-8601-formatted request for a 2026 date failed
+#: with a raw ``500 Internal Server Error`` / ``"Invalid time string: ..."``
+#: regardless of whether the requested time was hours in the past or
+#: seconds in the future, which ruled out a past/future validation rule.
+#: The fix was found empirically: a space-separated, no-timezone-suffix
+#: value — matching the exact wire shape the source uses for its own
+#: response ``value.t`` field (e.g. ``"2026-09-23 00:05:00.344"``) —
+#: succeeded immediately. The connector's internal cursor arithmetic stays
+#: ISO-8601 (``TIMESTAMP_FORMAT`` above); this format is applied only at
+#: the point a timestamp is placed into an actual HTTP request parameter
+#: (see ``_to_wire_timestamp`` in ``apis.py``). No milliseconds: the
+#: confirmed-working live request omitted them, even though responses
+#: include millisecond precision.
+WIRE_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 #: Size of one ``timeseries`` partition, in seconds.
 DEFAULT_WINDOW_SECONDS = 86_400

@@ -11,7 +11,7 @@ This is a small, purpose-built REST API in front of a "Hive" — an industrial d
 
 `TBD` / assumption: web research (see Sources) strongly suggests this spec matches the REST API shipped with **Prediktor's "Apis" / "Apis Foundation" Hive platform** (a process historian/SCADA product where "Hive" = real-time data hub, "modules" = plug-ins such as `ApisLogger`/`ApisOpcUa`, and historical values are stored in a companion time-series store referred to as "HoneyStore"). This external context is used only for narrative framing (e.g., why `timeseries` requires items to be "logged") — it is **not** used to assert any field name, schema, or parameter not present in the spec itself.
 
-## **Live Validation Findings (manual spot-check, 2026-09-22)**
+## **Live Validation Findings (manual spot-check, 2026-09-22 to 2026-09-23)**
 
 A developer ran a handful of authenticated calls against a real Apis Hive instance before the full `/validate-connector` record-mode pass. This corrects several assumptions made when this document was first written from the spec alone:
 
@@ -24,7 +24,8 @@ A developer ran a handful of authenticated calls against a real Apis Hive instan
 | `value.q` open string, enum unconfirmed | Confirmed open and mixed-case: observed `"Good"` (capital), while the `quality` *filter* parameter only accepts lowercase `good`/`uncertain`/`bad`. |
 | 206 truncation is a theoretical risk implied by the spec | Confirmed real: an unfiltered `item=*` call against an instance with ~100 items already returned `206 Partial Content`. |
 | `Authorization` header form (`Bearer <token>` vs. bare token) unconfirmed | Confirmed both work identically (`200 OK` either way) against this instance. |
-| `timeseries` per-item bundle shape (`{item, values: [...]}`) | Confirmed as the outer shape. The one live call made returned zero points for its window (2024-01-01 to 2024-01-02), so the shape of an individual point inside a populated array, and whether `endtime` is inclusive or exclusive, remain **unconfirmed** — re-check with a recent time window against an item known to have current data. |
+| `timeseries` per-item bundle shape (`{item, values: [...]}`), per-point shape | **Confirmed (2026-09-23)**, both outer bundle and inner `{v, q, t}` point: `[{"item":"ApisOT.Signal19","values":[{"v":423.99,"q":"Good","t":"2026-09-23 00:05:00.344"}, ...]}]`. Whether `endtime` is inclusive or exclusive remains unconfirmed (the confirmed window had continuous data, so the boundary wasn't exercised). |
+| Request timestamps (`updatedSince`/`starttime`/`endtime`) sent as ISO-8601 (matching the spec's own example, e.g. `2023-06-01T12:00:00Z`) | **Wrong — found and fixed (2026-09-23).** Every ISO-8601-formatted request for a 2026 date returned a raw `500 Internal Server Error` / `"Invalid time string: ..."`, regardless of whether the timestamp was hours in the past or seconds in the future (ruling out a past/future validation rule). The real required format is space-separated with no timezone suffix (e.g. `2026-09-23 00:05:00`) — identical in style to the response `value.t` field. Fixed in `apis.py`/`apis_schemas.py` via a new `WIRE_TIMESTAMP_FORMAT` constant and `_to_wire_timestamp()` conversion applied only at the point of building the HTTP request; the connector's internal cursor/offset representation and the user-facing `start_timestamp` option remain ISO-8601. |
 
 ## **Authorization**
 

@@ -769,14 +769,33 @@ def register_lakeflow_source(spark):
     #: Format is always JSON — the spec defines no CSV schema.
     RESPONSE_FORMAT = "json"
 
-    #: Timestamp rendering for ``updatedSince`` / ``starttime`` / ``endtime``.
-    #: ``apis_datetime_format`` also accepts relative "OPC time" expressions
-    #: (``DAY-1D``), but incremental reads must be deterministic and replayable,
-    #: so the connector always computes and sends absolute ISO-8601 instants.
-    #: Second precision with a ``Z`` suffix matches the spec's own example
-    #: (``2023-06-01T12:00:00Z``).
+    #: Internal cursor/offset representation ONLY (checkpoints, ``_init_time``,
+    #: ``_add_seconds`` arithmetic). Kept as clean ISO-8601 for readability and
+    #: because it is never sent to the source directly — see
+    #: ``WIRE_TIMESTAMP_FORMAT`` below for what actually goes on the wire.
     TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
     EPOCH_ISO = "1970-01-01T00:00:00Z"
+
+    #: The actual wire format for ``updatedSince`` / ``starttime`` / ``endtime``
+    #: request parameters — CONFIRMED via a live spot-check (2026-09-23) against
+    #: a real Prediktor Apis Hive instance. This directly contradicts what was
+    #: previously assumed here: the spec's own example (``2023-06-01T12:00:00Z``)
+    #: suggested ISO-8601, and an initial live probe using that exact format
+    #: even *appeared* to succeed (200, empty body) for a fully-past 2024 date —
+    #: but every subsequent ISO-8601-formatted request for a 2026 date failed
+    #: with a raw ``500 Internal Server Error`` / ``"Invalid time string: ..."``
+    #: regardless of whether the requested time was hours in the past or
+    #: seconds in the future, which ruled out a past/future validation rule.
+    #: The fix was found empirically: a space-separated, no-timezone-suffix
+    #: value — matching the exact wire shape the source uses for its own
+    #: response ``value.t`` field (e.g. ``"2026-09-23 00:05:00.344"``) —
+    #: succeeded immediately. The connector's internal cursor arithmetic stays
+    #: ISO-8601 (``TIMESTAMP_FORMAT`` above); this format is applied only at
+    #: the point a timestamp is placed into an actual HTTP request parameter
+    #: (see ``_to_wire_timestamp`` in ``apis.py``). No milliseconds: the
+    #: confirmed-working live request omitted them, even though responses
+    #: include millisecond precision.
+    WIRE_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 
     #: Size of one ``timeseries`` partition, in seconds.
     DEFAULT_WINDOW_SECONDS = 86_400
@@ -1338,7 +1357,7 @@ def register_lakeflow_source(spark):
                 "format": RESPONSE_FORMAT,
             }
             if updated_since:
-                params["updatedSince"] = updated_since
+                params["updatedSince"] = _to_wire_timestamp(updated_since)
             quality = _resolve_quality(table_options)
             if quality:
                 params["quality"] = quality
@@ -1366,8 +1385,8 @@ def register_lakeflow_source(spark):
             """
             params: dict[str, Any] = {
                 "item": list(patterns),
-                "starttime": start_iso,
-                "endtime": end_iso,
+                "starttime": _to_wire_timestamp(start_iso),
+                "endtime": _to_wire_timestamp(end_iso),
                 "format": RESPONSE_FORMAT,
             }
             quality = _resolve_quality(table_options)
@@ -1916,6 +1935,18 @@ def register_lakeflow_source(spark):
 
     def _normalize_timestamp(value: str) -> str:
         return _format_iso(_parse_iso(value))
+
+
+    def _to_wire_timestamp(iso_value: str) -> str:
+        """Convert an internal ISO-8601 cursor/offset value into the format the
+        source actually accepts on the wire (CONFIRMED live, 2026-09-23) for
+        ``updatedSince``/``starttime``/``endtime`` request parameters — see
+        ``WIRE_TIMESTAMP_FORMAT`` in ``apis_schemas.py`` for why this differs
+        from ISO-8601. Apply this only when placing a timestamp into an actual
+        HTTP request parameter, never to values used for internal cursor
+        arithmetic or comparisons.
+        """
+        return _parse_iso(iso_value).strftime(WIRE_TIMESTAMP_FORMAT)
 
 
     def _add_seconds(iso_value: str, seconds: int) -> str:
