@@ -39,6 +39,45 @@ with no ``content``/``schema`` block at all. That means:
 Anything marked INFERRED must be re-validated against a live Hive instance
 during Phase 2 (``/validate-connector``) before it is treated as settled.
 
+LIVE VALIDATION FINDINGS (manual spot-check, 2026-09-22)
+---------------------------------------------------------
+A developer ran a handful of authenticated calls against a real Apis Hive
+instance (not yet the full ``/validate-connector`` record-mode pass) and
+confirmed/corrected several of the assumptions above:
+
+* **``item_name`` is not the real field name.** The spec's own declared
+  ``single_value_t.item_name`` does not match reality: the live server
+  returns ``"item"`` for both ``values`` and ``timeseries``, and ``"name"``
+  for ``items``. ``_ITEM_NAME_KEYS`` in ``apis.py`` already includes both
+  ``"name"`` and ``"item"`` ahead of this discovery, so no code change was
+  needed — but this means the spec's declared schema was itself wrong, not
+  just incomplete.
+* **``items`` has a real ``"type"`` field** (observed values: ``"Signal"``,
+  ``"Function item"``, ``"Status"``) that was not modelled at all. Added
+  below as ``item_type``.
+* **Module derivation confirmed correct**: splitting ``item_name`` on the
+  first ``.`` reproduces exactly the module names the live ``modules``
+  endpoint lists (``PumpHouse``, ``DataSampler``, ``ApisOT``,
+  ``UaPublisherBee``, etc.), even for deeply nested paths.
+* **``timestamp`` is NOT ISO-8601.** A live ``value.t`` looked like
+  ``"2026-09-22 20:38:02.545"`` — space-separated (no ``T``), millisecond
+  precision, no timezone suffix. The "presumed ISO-8601" language below has
+  been corrected. This does not affect connector logic (offsets are always
+  self-generated ISO-8601 strings, never parsed from response ``t``
+  values), only downstream casting guidance.
+* **Quality is genuinely open-ended and mixed-case**: a live ``value.q``
+  came back as ``"Good"`` (capitalized), confirming the decision not to
+  constrain/lowercase this column.
+* **The 206 truncation limit is real, not theoretical**: an unfiltered
+  ``item=*`` call against a live instance with roughly 100 items already
+  came back ``206 Partial Content``.
+* **Auth accepts both forms**: a live call with ``Authorization: Bearer
+  <token>`` and one with the bare token both returned identical ``200``
+  responses, so the ``auth_scheme`` default of ``Bearer`` needs no change.
+* **Still unconfirmed**: the exact per-point shape inside a populated
+  ``timeseries`` bundle (the one live call made returned zero points for
+  its window), and whether ``endtime`` is inclusive or exclusive.
+
 OTHER REAL LIMITATIONS OF THE SOURCE (not oversights here)
 ----------------------------------------------------------
 * **No pagination exists anywhere in the spec** — no ``limit``, ``offset``,
@@ -90,21 +129,27 @@ ITEM_ATTRIBUTE_STRUCT = StructType(
 # Table schemas
 # ---------------------------------------------------------------------------
 
-#: INFERRED (see SCHEMA PROVENANCE above).
+#: INFERRED, except where noted (see LIVE VALIDATION FINDINGS above).
 #:
 #: ``instance`` is not part of any response body — it is the ``{instance}``
 #: path segment, stamped onto every row because item names are only unique
 #: within a Hive instance.
 #:
 #: ``module`` is derived client-side by splitting ``item_name`` on the first
-#: ``.`` — the ``<Module>.<Item>`` convention is *observed* in the spec's
-#: parameter descriptions (``Worker.Signal1``, ``Work*.Sig*``) but never
-#: declared as a naming rule, so the field is nullable and best-effort.
+#: ``.``. CONFIRMED by a live spot-check: the derived value matches the
+#: real ``modules`` endpoint's module names exactly, including for deeply
+#: nested item paths.
+#:
+#: ``item_type`` is CONFIRMED live (observed values: ``"Signal"``,
+#: ``"Function item"``, ``"Status"``) — the source's own field is literally
+#: named ``"type"``, renamed here to avoid colliding with Python/SQL
+#: connotations of a bare ``type`` column.
 ITEMS_SCHEMA = StructType(
     [
         StructField("instance", StringType(), True),
         StructField("item_name", StringType(), True),
         StructField("module", StringType(), True),
+        StructField("item_type", StringType(), True),
         StructField("attributes", ArrayType(ITEM_ATTRIBUTE_STRUCT, True), True),
     ]
 )
@@ -128,10 +173,17 @@ ITEMS_SCHEMA = StructType(
 #: response field carries no such enum, so richer raw quality codes (e.g.
 #: OPC codes) must not be rejected.
 #:
-#: ``timestamp`` is presumed ISO-8601 by analogy with ``apis_datetime_format``,
-#: but the response field itself declares no format — kept as a string so
-#: an unexpected rendering does not fail the whole micro-batch. It also
-#: doubles as the table's cursor field (see ``TABLE_METADATA`` below).
+#: ``timestamp`` is NOT ISO-8601, confirmed live: an observed value was
+#: ``"2026-09-22 20:38:02.545"`` — space-separated (no ``T``), millisecond
+#: precision, no timezone suffix. Kept as a string regardless, since the
+#: response field declares no format and a different Hive deployment could
+#: render it differently. It also doubles as the table's cursor field (see
+#: ``TABLE_METADATA`` below); this is safe because the connector's own
+#: cursor/offset values are always self-generated ISO-8601 strings, never
+#: parsed out of a response ``t`` value. Downstream consumers casting this
+#: column should use its real format, e.g.
+#: ``TO_TIMESTAMP(timestamp, 'yyyy-MM-dd HH:mm:ss.SSS')``, not
+#: ``TO_TIMESTAMP(timestamp)``.
 VALUES_SCHEMA = StructType(
     [
         StructField("instance", StringType(), True),

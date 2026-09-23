@@ -2,6 +2,7 @@
   {
     "instance": "ApisHive",
     "item_name": "Worker.Signal1",
+    "type": "Signal",
     "attributes": [
       {
         "attrib_id": "10",
@@ -12,6 +13,7 @@
   {
     "instance": "ApisHive",
     "item_name": "Worker.Signal2",
+    "type": "Signal",
     "attributes": [
       {
         "attrib_id": "10",
@@ -22,6 +24,7 @@
   {
     "instance": "ApisHive",
     "item_name": "Logger.Temperature",
+    "type": "Function item",
     "attributes": [
       {
         "attrib_id": "10",
@@ -36,6 +39,7 @@
   {
     "instance": "ApisHive",
     "item_name": "Logger.Pressure",
+    "type": "Function item",
     "attributes": [
       {
         "attrib_id": "10",
@@ -50,6 +54,7 @@
   {
     "instance": "ApisHive",
     "item_name": "Simulator.Sine1",
+    "type": "Status",
     "attributes": [
       {
         "attrib_id": "10",

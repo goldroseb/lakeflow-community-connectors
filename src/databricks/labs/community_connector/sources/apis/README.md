@@ -6,7 +6,7 @@ The Apis REST Service is the HTTP front end of a "Hive" — an industrial data h
 
 The connector reads three tables from a Hive instance: the item catalog (`items`), current values (`values`), and historical/aggregated values (`timeseries`).
 
-> **Validation status**: this connector has not yet been validated against a live Apis deployment. Several response shapes are inferred from the source's OpenAPI specification rather than declared by it. See [Known Limitations](#known-limitations) before using it in production.
+> **Validation status**: this connector has not yet been through a full `/validate-connector` record-mode pass. A manual spot-check against a live Apis deployment (2026-09-22) confirmed the `items`/`values`/`timeseries` field names, the `module`/`item_type` derivations, and the `Authorization` header form — but the full record-mode test suite has not run. See [Known Limitations](#known-limitations) before using it in production.
 
 ## Prerequisites
 
@@ -61,7 +61,7 @@ This connector uses a simple bearer token — there is no OAuth app to register,
        -H "Authorization: Bearer <token>"
      ```
 
-   - If that returns `401`/`403` but the same call **without** the `Bearer ` prefix succeeds, set the `auth_scheme` connection option to an empty string. The Apis specification declares `Authorization` as a raw header rather than a formal bearer scheme, so both forms are plausible depending on deployment.
+   - A live spot-check (2026-09-22) confirmed a Prediktor Apis Hive instance accepts **both** `Authorization: Bearer <token>` and the bare token with no prefix — the default `auth_scheme` of `Bearer` should work out of the box. If your deployment differs and this call returns `401`/`403`, retry without the `Bearer ` prefix and set the `auth_scheme` connection option to an empty string if that succeeds instead.
 
 3. **Identify the Hive instance name (`instance`, optional but recommended)**
    - The response to `GET /hive` (as in the `curl` above) lists the instance names, for example `ApisHive`.
@@ -106,13 +106,14 @@ Other endpoints of the Apis REST Service are intentionally not exposed as tables
 ### Columns that require attention
 
 - **`instance`** — added by the connector from the Hive instance being read; it is not part of any response body. It is part of the primary key of `items` and `values` because item names are unique only *within* an instance.
-- **`item_name`** — the fully-qualified item name, conventionally `<Module>.<Item>` (for example `Worker.Signal1`).
-- **`module`** (`items` only) — derived by the connector by splitting `item_name` at the first `.`. The `<Module>.<Item>` convention is observed but not formally guaranteed by the source, so this column is best-effort and may be `null`.
+- **`item_name`** — the fully-qualified item name, conventionally `<Module>.<Item>` (for example `Worker.Signal1`). Confirmed live: the source's own field is actually named `name` (`values`/`timeseries` use `item` instead) rather than the OpenAPI spec's declared `item_name` — the connector tolerates all of these on read, so this is transparent to you.
+- **`module`** (`items` only) — derived by the connector by splitting `item_name` at the first `.`. Confirmed live: this reproduces the real `modules` endpoint's module names exactly, including for deeply nested item paths.
+- **`item_type`** (`items` only) — confirmed live: the source's own `type` field (observed values: `Signal`, `Function item`, `Status`). Renamed from the wire field `type` to `item_type` to avoid ambiguity with SQL/Python's own use of that word.
 - **`value` / `quality` / `timestamp`** (`values`, `timeseries`) — the source's declared `value: {v, q, t}` triple, flattened onto three top-level columns instead of kept as a nested struct, so downstream SQL can reference each field directly:
   - `value` — the reading itself, stored as a **string**. The source places no type constraint on it; the underlying point may be numeric, boolean, or textual, and only the historian knows which. A numeric point arrives as, for example, `"42.7"`. Cast it downstream where the point's real type is known.
-  - `quality` — quality indicator. The source's quality *filter* offers only `good` / `uncertain` / `bad`, but the response field is an open string, so richer raw quality codes (for example OPC codes) are preserved rather than rejected.
-  - `timestamp` — timestamp of the reading, kept as a string. It is presumed ISO 8601, but the source declares no format for this field; keeping it as a string prevents an unexpected rendering from failing a whole batch. It also doubles as the incremental cursor for both tables.
-- **`attributes`** (`items` only) — an array of `{attrib_id, value}` pairs, populated only when you request attribute IDs via the `attrib` table option. Both sides are open strings: the source documents no registry mapping attribute IDs to meanings, so you must obtain the ID meanings from your Apis administrator.
+  - `quality` — quality indicator. Confirmed live as an open string, not an enum: a real reading came back `"Good"` (capitalized), while the *filter* parameter only accepts lowercase `good`/`uncertain`/`bad`. Don't assume only those three values appear.
+  - `timestamp` — timestamp of the reading, kept as a string. **Confirmed live it is NOT ISO 8601**: an observed value was `"2026-09-22 20:38:02.545"` — space-separated (no `T`), millisecond precision, no timezone. It also doubles as the incremental cursor for both tables; that's safe because the connector's own offsets are always self-generated ISO-8601 strings, never parsed from this field.
+- **`attributes`** (`items` only) — an array of `{attrib_id, value}` pairs, populated only when you request attribute IDs via the `attrib` table option. Both sides are open strings: the source documents no registry mapping attribute IDs to meanings, so you must obtain the ID meanings from your Apis administrator. Not yet confirmed live (the spot-check didn't request any `attrib` IDs).
 - **`timeseries` has no declared primary key** because append-only tables are inserted rather than merged. Its *logical* uniqueness key is `(instance, item_name, timestamp)`; use that if you deduplicate downstream.
 
 ## Table Configurations
@@ -177,10 +178,11 @@ These are set inside the `table_configuration` map alongside any source-specific
 
 | Apis concept | Source type | Databricks type | Notes |
 |---|---|---|---|
-| `item_name` | string | `string` | Fully-qualified item name, conventionally `<Module>.<Item>`. |
+| `item_name` | string (source field observed as `name` on `items`, `item` on `values`/`timeseries` — not the OpenAPI spec's declared `item_name`) | `string` | Fully-qualified item name, conventionally `<Module>.<Item>`. |
+| `item_type` (`items` only) | string, confirmed live (observed: `Signal`, `Function item`, `Status`) | `string` | The source's own field is named `type`; renamed to `item_type` to avoid ambiguity. |
 | `value` (the reading) | untyped — no constraint declared by the source | `string` | Deliberately stringified so a numeric, boolean, or textual point all ingest losslessly instead of failing the batch. Cast downstream (for example `CAST(value AS DOUBLE)`) once the point's real type is known. |
-| `quality` (quality) | string | `string` | Open string, not an enum. Raw quality codes beyond `good` / `uncertain` / `bad` are preserved. |
-| `timestamp` (timestamp) | string, no declared format | `string` | Presumed ISO 8601 but not declared as such by the source; kept as a string. Cast with `TO_TIMESTAMP(timestamp)` downstream. |
+| `quality` (quality) | string, confirmed live as mixed-case (e.g. `"Good"`) | `string` | Open string, not an enum. Raw quality codes beyond `good` / `uncertain` / `bad` (and beyond lowercase) are preserved. |
+| `timestamp` (timestamp) | string, confirmed live as `yyyy-MM-dd HH:mm:ss.SSS` (e.g. `"2026-09-22 20:38:02.545"`) — **not** ISO 8601 | `string` | Kept as a string since the source declares no fixed format. Cast with `TO_TIMESTAMP(timestamp, 'yyyy-MM-dd HH:mm:ss.SSS')` downstream, not the ISO-8601 form. |
 | Attribute ID / value (`items`) | number (request) / undeclared (response) | `array<struct<attrib_id: string, value: string>>` | Both sides kept as open strings because the source publishes no attribute-ID registry. |
 | Hive instance name | path segment (not a response field) | `string` | Stamped onto every row by the connector for scoping. |
 | Request timestamps (`updatedSince`, `starttime`, `endtime`) | ISO 8601 or relative "OPC time" expression | n/a (request-only) | The connector always sends absolute UTC ISO 8601 instants (`YYYY-MM-DDTHH:MM:SSZ`). |
@@ -265,13 +267,13 @@ On the **first run** of `timeseries`, either set `start_timestamp` to the earlie
 - **Use `aggregate` + `interval` to reduce volume** when you do not need every recorded point — resampling at the source is far cheaper than ingesting raw history and aggregating afterward.
 - **Schedule to match the data's real cadence.** `values` only reports current values, so polling far faster than the historian updates adds load without adding rows. `items` changes rarely — a daily or weekly refresh is usually plenty.
 - **Treat rate limits as unknown.** The source documents none, so the connector retries conservatively with exponential backoff. If you see gateway-level throttling, lower `max_partitions` to reduce concurrent requests.
-- **Cast types downstream.** Build a view that casts `value` and `timestamp` to their real types once, and consume that view instead of the raw table.
+- **Cast types downstream.** Build a view that casts `value` to its real type and `timestamp` with `TO_TIMESTAMP(timestamp, 'yyyy-MM-dd HH:mm:ss.SSS')` (confirmed live format, not ISO 8601) once, and consume that view instead of the raw table.
 
 #### Troubleshooting
 
 **Common Issues:**
 
-- **`401` / `403` on every request** — verify the token is correct and not expired. If a direct `curl` succeeds without the `Bearer ` prefix, set the `auth_scheme` connection option to an empty string; the source does not specify which form the server expects.
+- **`401` / `403` on every request** — verify the token is correct and not expired. A live spot-check confirmed a Prediktor Apis Hive instance accepts both the `Bearer <token>` and bare-token forms, so this is more likely a bad/expired token than a header-format mismatch; if a direct `curl` does succeed without the `Bearer ` prefix on your deployment, set the `auth_scheme` connection option to an empty string.
 - **`404` on an instance-scoped call** — the Hive instance name is wrong or the instance is not running. List instances with `GET /hive` and set `instance` explicitly.
 - **TLS / certificate errors** — on-premises Hive deployments frequently use self-signed certificates. Prefer installing the certificate in the runtime's trust store; as a last resort set `verify_ssl` to `false` (not recommended for production).
 - **Connection timeouts** — confirm the compute running the pipeline has network reachability to the historian's host and port, then raise `request_timeout` if the historian is simply slow to answer wide queries.
@@ -284,24 +286,26 @@ On the **first run** of `timeseries`, either set `start_timestamp` to the earlie
 
 ## Known Limitations
 
-These are limitations of the Apis REST Service itself or of the current, not-yet-live-validated state of this connector — not configuration mistakes.
+These are limitations of the Apis REST Service itself or of the current, partially-live-validated state of this connector — not configuration mistakes. A manual spot-check against a live Prediktor Apis Hive instance (2026-09-22) confirmed several items below that were previously pure inference; a full `/validate-connector` record-mode pass has not yet run.
 
-1. **No pagination exists in the source API.** No endpoint defines a `limit`, `offset`, `cursor`, page-token parameter, or `Link` header — yet `items`, `values`, and `timeseries` can all return a *partial content* response, which means the server **can** truncate a large result with no documented way to detect where it stopped or to resume. The connector therefore issues exactly one request per (instance, item pattern, time window) combination and never invents a continuation parameter. Truncation is mitigated the only way the source allows: **narrow your `item` patterns and shorten `window_seconds`.** A truncated response is logged as a warning rather than silently accepted, so watch pipeline logs for it — if it appears, your table may be incomplete for that run.
-2. **The `items` and `timeseries` response schemas are inferred, not declared.** The source's specification declares a response body for the current-values endpoint only. Everything else declares success with no body schema at all. Consequently:
-   - `items` columns (`item_name`, `module`, `attributes`) are modeled on the only item identity the source exposes plus the attribute-request parameter. Field names are not confirmed.
-   - `timeseries` is modeled on a historian's canonical shape — one row per (item, point in time), carrying the same `v`/`q`/`t` triple as current values. This is the largest gap in the specification.
-   - The connector's parsers deliberately accept several plausible response shapes for these two tables rather than hard-failing on an unexpected one, but column names and nesting for `items` and `timeseries` should be treated as **provisional until validated against a live Hive instance**. Pin a schema downstream only after you have confirmed real output.
-3. **Not yet validated against a live source.** No live-testing pass has been performed. In addition to the inferred schemas above, the following are unconfirmed: the exact `Authorization` header form (hence the `auth_scheme` escape hatch), whether the end of a `timeseries` window is exclusive, the format of `timestamp`, and the shape of the instance discovery response.
-4. **No delete tracking for any object.** The source exposes no delete endpoint and no tombstone field, so no table supports CDC with deletes. Removals can only be inferred by diffing successive `items` snapshots.
-5. **No documented rate limits.** The source declares no throttling responses, headers, or guidance. The connector retries conservatively with exponential backoff on throttling and gateway errors, but safe request rates must be established empirically for your deployment.
-6. **Attribute IDs have no published meaning.** The `attrib` option takes numeric IDs and the `attributes` column returns them verbatim. There is no ID-to-name registry in the API; obtain the mapping from your Apis administrator.
-7. **`interval`'s interaction with `aggregate` is unspecified.** The source does not state whether `interval` is ignored when `aggregate` is omitted. Set them together.
-8. **`items` cannot be read incrementally.** The catalog has no change cursor and no modified timestamp, so it is fully re-listed each run. The item pattern narrows scope but is not a cursor.
-9. **`values` cursors on wall-clock progress, not on observed record timestamps.** The endpoint returns one current value per item with no ordering guarantee and no upper time bound, so no reliable record-derived cursor exists. Re-reading a boundary row is harmless because the table upserts on `(instance, item_name)`.
-10. **No point-in-time historical lookup.** The source has no "value at this instant" endpoint. Retrieving one historical reading requires a `timeseries` request over a narrow window around the desired time.
-11. **JSON only.** The source also offers CSV, but defines no CSV schema, so the connector always requests JSON.
-12. **Read-only.** The source's write endpoint for pushing values into the historian is intentionally not used by this connector.
-13. **Instance runstate and module listings are not ingested.** They are health and configuration lookups rather than row-producing datasets.
+1. **No pagination exists in the source API — confirmed live, not just theoretical.** No endpoint defines a `limit`, `offset`, `cursor`, page-token parameter, or `Link` header — and a live, unfiltered `item=*` call against an instance with roughly 100 items already came back `206 Partial Content`. The server **will** truncate with no documented way to detect where it stopped or to resume. The connector therefore issues exactly one request per (instance, item pattern, time window) combination and never invents a continuation parameter. Truncation is mitigated the only way the source allows: **narrow your `item` patterns and shorten `window_seconds`.** A truncated response is logged as a warning rather than silently accepted, so watch pipeline logs for it — if it appears, your table may be incomplete for that run.
+2. **The `items` response schema is now largely confirmed; `timeseries`'s per-point shape is still inferred.** The source's specification declares a response body for the current-values endpoint only, but a live spot-check filled in most of the rest:
+   - `items` — **confirmed**: the identifying field, `module` derivation, and the new `item_type` column (source field `type`; observed values `Signal`, `Function item`, `Status`) all matched real responses. The `attributes` column remains unconfirmed (the spot-check didn't request any `attrib` IDs).
+   - `values` — **confirmed**: the `{v, q, t}` triple, flattened onto `value`/`quality`/`timestamp`, matches a real reading exactly. Quality is genuinely open and mixed-case (`"Good"`, not `"good"`). Timestamp format is confirmed **not** ISO-8601 (see below).
+   - `timeseries` — the outer per-item bundle shape (`{item, values: [...]}`) is **confirmed**, but the live spot-check's one call returned zero points for its window, so the shape of an individual point inside a populated `values` array (presumably the same `{v, q, t}` triple as `values`, but unconfirmed) and whether `endtime` is inclusive or exclusive both remain open. This is still the largest gap.
+   - The connector's parsers still deliberately accept several plausible response shapes for these tables rather than hard-failing on an unexpected one, since not every Apis deployment need behave identically to the one spot-checked.
+3. **`timestamp` is not ISO-8601 — confirmed live.** A real `value.t` looked like `"2026-09-22 20:38:02.545"`: space-separated (no `T`), millisecond precision, no timezone. This only affects downstream casting (use `TO_TIMESTAMP(timestamp, 'yyyy-MM-dd HH:mm:ss.SSS')`, not the ISO-8601 form) — it does not affect connector logic, since cursors/offsets are always self-generated ISO-8601 strings, never parsed from this field.
+4. **Remaining unconfirmed items.** Whether `endtime` is exclusive or inclusive on a populated `timeseries` window, and the exact shape of a non-empty `timeseries` point, both still need a live call that actually returns data (try a recent window, since historical retention may not reach back as far as `backfill_days` assumes). The `attributes` column and instance-discovery response shape (`hive_instances`) beyond the top-level `name` field are also unconfirmed. The `Authorization` header form, by contrast, **is confirmed**: a live instance accepted both `Bearer <token>` and the bare token.
+5. **No delete tracking for any object.** The source exposes no delete endpoint and no tombstone field, so no table supports CDC with deletes. Removals can only be inferred by diffing successive `items` snapshots.
+6. **No documented rate limits.** The source declares no throttling responses, headers, or guidance. The connector retries conservatively with exponential backoff on throttling and gateway errors, but safe request rates must be established empirically for your deployment.
+7. **Attribute IDs have no published meaning.** The `attrib` option takes numeric IDs and the `attributes` column returns them verbatim. There is no ID-to-name registry in the API; obtain the mapping from your Apis administrator.
+8. **`interval`'s interaction with `aggregate` is unspecified.** The source does not state whether `interval` is ignored when `aggregate` is omitted. Set them together.
+9. **`items` cannot be read incrementally.** The catalog has no change cursor and no modified timestamp, so it is fully re-listed each run. The item pattern narrows scope but is not a cursor.
+10. **`values` cursors on wall-clock progress, not on observed record timestamps.** The endpoint returns one current value per item with no ordering guarantee and no upper time bound, so no reliable record-derived cursor exists. Re-reading a boundary row is harmless because the table upserts on `(instance, item_name)`.
+11. **No point-in-time historical lookup.** The source has no "value at this instant" endpoint. Retrieving one historical reading requires a `timeseries` request over a narrow window around the desired time.
+12. **JSON only.** The source also offers CSV, but defines no CSV schema, so the connector always requests JSON.
+13. **Read-only.** The source's write endpoint for pushing values into the historian is intentionally not used by this connector.
+14. **Instance runstate and module listings are not ingested.** They are health and configuration lookups rather than row-producing datasets.
 
 ## References
 

@@ -853,7 +853,8 @@ class ApisLakeflowConnect(LakeflowConnect, SupportsPartitionedStream):
 def _normalize_items(instance: str, payload: Any) -> list[dict]:
     """Project an ``items`` response onto ``ITEMS_SCHEMA``.
 
-    INFERRED shape. Accepted renderings:
+    Accepted renderings for the identifying field (CONFIRMED live: the real
+    server sends ``name``, not the spec's ``item_name``):
       * array of objects with an item-name field (``item_name`` per
         ``single_value_t``, or ``name``/``item``);
       * array of bare item-name strings;
@@ -867,9 +868,12 @@ def _normalize_items(instance: str, payload: Any) -> list[dict]:
             {
                 "instance": instance,
                 "item_name": name,
-                # Derived, not returned: the <Module>.<Item> convention is
-                # only *observed* in the spec's parameter descriptions.
+                # CONFIRMED live: matches the real `modules` endpoint's
+                # module names exactly, including for deeply nested paths.
                 "module": name.split(".", 1)[0] if "." in name else None,
+                # CONFIRMED live: the source's own field is named "type"
+                # (observed: "Signal", "Function item", "Status").
+                "item_type": entry.get("type") if isinstance(entry, dict) else None,
                 "attributes": _normalize_attributes(entry),
             }
         )

@@ -73,6 +73,10 @@
 # * `item_name` values are module-qualified (`Worker.Signal1`), the convention
 #   the source's own parameter examples use, so the connector's client-side
 #   `module` derivation (split on the first `.`) is exercised.
+# * `items.json` records carry a `type` field (`Signal` / `Function item` /
+#   `Status`) so the connector's `item_type` column — CONFIRMED live via a
+#   manual spot-check, not just inferred — has non-null coverage in
+#   simulate mode too.
 # * `items.json` keeps an `instance` field purely so `/hive`, `runstate` and
 #   `modules` can borrow this corpus rather than reference files that the
 #   table-driven generator will not produce (a missing corpus silently serves

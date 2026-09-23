@@ -616,21 +616,27 @@ def register_lakeflow_source(spark):
     # Table schemas
     # ---------------------------------------------------------------------------
 
-    #: INFERRED (see SCHEMA PROVENANCE above).
+    #: INFERRED, except where noted (see LIVE VALIDATION FINDINGS above).
     #:
     #: ``instance`` is not part of any response body — it is the ``{instance}``
     #: path segment, stamped onto every row because item names are only unique
     #: within a Hive instance.
     #:
     #: ``module`` is derived client-side by splitting ``item_name`` on the first
-    #: ``.`` — the ``<Module>.<Item>`` convention is *observed* in the spec's
-    #: parameter descriptions (``Worker.Signal1``, ``Work*.Sig*``) but never
-    #: declared as a naming rule, so the field is nullable and best-effort.
+    #: ``.``. CONFIRMED by a live spot-check: the derived value matches the
+    #: real ``modules`` endpoint's module names exactly, including for deeply
+    #: nested item paths.
+    #:
+    #: ``item_type`` is CONFIRMED live (observed values: ``"Signal"``,
+    #: ``"Function item"``, ``"Status"``) — the source's own field is literally
+    #: named ``"type"``, renamed here to avoid colliding with Python/SQL
+    #: connotations of a bare ``type`` column.
     ITEMS_SCHEMA = StructType(
         [
             StructField("instance", StringType(), True),
             StructField("item_name", StringType(), True),
             StructField("module", StringType(), True),
+            StructField("item_type", StringType(), True),
             StructField("attributes", ArrayType(ITEM_ATTRIBUTE_STRUCT, True), True),
         ]
     )
@@ -654,10 +660,17 @@ def register_lakeflow_source(spark):
     #: response field carries no such enum, so richer raw quality codes (e.g.
     #: OPC codes) must not be rejected.
     #:
-    #: ``timestamp`` is presumed ISO-8601 by analogy with ``apis_datetime_format``,
-    #: but the response field itself declares no format — kept as a string so
-    #: an unexpected rendering does not fail the whole micro-batch. It also
-    #: doubles as the table's cursor field (see ``TABLE_METADATA`` below).
+    #: ``timestamp`` is NOT ISO-8601, confirmed live: an observed value was
+    #: ``"2026-09-22 20:38:02.545"`` — space-separated (no ``T``), millisecond
+    #: precision, no timezone suffix. Kept as a string regardless, since the
+    #: response field declares no format and a different Hive deployment could
+    #: render it differently. It also doubles as the table's cursor field (see
+    #: ``TABLE_METADATA`` below); this is safe because the connector's own
+    #: cursor/offset values are always self-generated ISO-8601 strings, never
+    #: parsed out of a response ``t`` value. Downstream consumers casting this
+    #: column should use its real format, e.g.
+    #: ``TO_TIMESTAMP(timestamp, 'yyyy-MM-dd HH:mm:ss.SSS')``, not
+    #: ``TO_TIMESTAMP(timestamp)``.
     VALUES_SCHEMA = StructType(
         [
             StructField("instance", StringType(), True),
@@ -1608,7 +1621,8 @@ def register_lakeflow_source(spark):
     def _normalize_items(instance: str, payload: Any) -> list[dict]:
         """Project an ``items`` response onto ``ITEMS_SCHEMA``.
 
-        INFERRED shape. Accepted renderings:
+        Accepted renderings for the identifying field (CONFIRMED live: the real
+        server sends ``name``, not the spec's ``item_name``):
           * array of objects with an item-name field (``item_name`` per
             ``single_value_t``, or ``name``/``item``);
           * array of bare item-name strings;
@@ -1622,9 +1636,12 @@ def register_lakeflow_source(spark):
                 {
                     "instance": instance,
                     "item_name": name,
-                    # Derived, not returned: the <Module>.<Item> convention is
-                    # only *observed* in the spec's parameter descriptions.
+                    # CONFIRMED live: matches the real `modules` endpoint's
+                    # module names exactly, including for deeply nested paths.
                     "module": name.split(".", 1)[0] if "." in name else None,
+                    # CONFIRMED live: the source's own field is named "type"
+                    # (observed: "Signal", "Function item", "Status").
+                    "item_type": entry.get("type") if isinstance(entry, dict) else None,
                     "attributes": _normalize_attributes(entry),
                 }
             )
