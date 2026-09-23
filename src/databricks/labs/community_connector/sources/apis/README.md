@@ -37,7 +37,7 @@ Provide the following **connection-level** options when creating the Unity Catal
 The full, definitive value for `externalOptionsAllowList` is:
 
 ```
-instance,instances,item,items,item_patterns,attrib,attribs,quality,aggregate,interval,start_timestamp,backfill_days,window_seconds,max_partitions,max_records_per_batch,max_windows_per_read
+instance,instances,item,items,item_patterns,attrib,attribs,quality,aggregate,interval,start_timestamp,backfill_days,window_seconds,max_partitions,max_records_per_batch,max_windows_per_read,items_per_request
 ```
 
 > **Note**: the options above (`item`, `quality`, `aggregate`, `window_seconds`, and so on) are **not** connection parameters. They are supplied per table under `table_configuration` in the pipeline spec, and their names must appear in `externalOptionsAllowList` for the connection to forward them.
@@ -74,7 +74,7 @@ A Unity Catalog connection for this connector can be created in two ways via the
 1. Follow the **Lakeflow Community Connector** flow from the **Add Data** page.
 2. Select an existing Lakeflow Community Connector connection for this source, or create a new one and supply `base_url` and `token` (plus any of the optional parameters above).
 3. Set `externalOptionsAllowList` to:
-   `instance,instances,item,items,item_patterns,attrib,attribs,quality,aggregate,interval,start_timestamp,backfill_days,window_seconds,max_partitions,max_records_per_batch,max_windows_per_read`
+   `instance,instances,item,items,item_patterns,attrib,attribs,quality,aggregate,interval,start_timestamp,backfill_days,window_seconds,max_partitions,max_records_per_batch,max_windows_per_read,items_per_request`
 
 The connection can also be created using the standard Unity Catalog API.
 
@@ -147,7 +147,7 @@ These are set inside the `table_configuration` map alongside any source-specific
 | Option | Required | Default | Description |
 |---|---|---|---|
 | `instance` / `instances` | No | connection value, else discovered | Comma-separated Hive instance name(s) for this table, overriding the connection-level setting. |
-| `item` / `items` / `item_patterns` | No | `*` | Comma-separated item name patterns, with `*` as the wildcard — for example `Work*.Sig*,Logger.*`. Each pattern is read independently and in parallel. Narrowing patterns is the primary way to keep responses from being truncated (see [Known Limitations](#known-limitations)). |
+| `item` / `items` / `item_patterns` | No | `*` | Comma-separated item name patterns, with `*` as the wildcard — for example `Work*.Sig*,Logger.*`. Each pattern is read independently and in parallel. Narrowing patterns is the primary way to keep responses from being truncated (see [Known Limitations](#known-limitations)). **Confirmed live**: the source only supports wildcards on `items`; for `values`/`timeseries`, the connector transparently resolves any wildcard pattern to real item names via `items` first (a literal, non-wildcard name is used as-is, at no extra request cost). |
 | `max_partitions` | No | `64` | Upper bound on parallel reads per micro-batch. When a request needs more time windows than this budget allows, windows are widened rather than producing thousands of tiny tasks. |
 | `max_records_per_batch` | No | `1000` | Caps records per batch on the sequential (non-parallel) read path. Ignored for `items`, which is always a full snapshot. |
 
@@ -162,6 +162,7 @@ These are set inside the `table_configuration` map alongside any source-specific
 | Option | Required | Default | Description |
 |---|---|---|---|
 | `quality` | No | none (no filter) | Minimum quality filter. One of `good`, `uncertain`, `bad`. An invalid value fails fast with a clear error instead of a bare HTTP 400. |
+| `items_per_request` | No | `50` | How many exact item names are batched into one request via repeated `item=` params. Confirmed live that batching multiple exact names into one request works; the real upper limit (URL length, server-side cap) is unconfirmed, so this default is a conservative placeholder — raise it once tested at scale on your deployment. |
 
 #### `timeseries` only
 
@@ -295,17 +296,18 @@ These are limitations of the Apis REST Service itself or of the current, partial
    - `timeseries` — **confirmed**: both the outer per-item bundle shape (`{item, values: [...]}`) and the per-point `{v, q, t}` triple inside it match a real, populated response. Whether `endtime` is inclusive or exclusive is still unconfirmed (the confirmed sample used a 10-second window with data throughout, so the boundary case wasn't exercised).
    - The connector's parsers still deliberately accept several plausible response shapes for these tables rather than hard-failing on an unexpected one, since not every Apis deployment need behave identically to the one spot-checked.
 3. **The request timestamp format was wrong — found and fixed via live testing.** The connector originally sent `updatedSince`/`starttime`/`endtime` as ISO-8601 (`2026-09-23T00:05:00Z`), matching the spec's own documented example. Live testing showed the server rejects this for any 2026-dated value with a raw `500 Internal Server Error` / `"Invalid time string: ..."` — regardless of whether the requested time was hours in the past or seconds in the future, ruling out a past/future validation rule. The actual required format, confirmed empirically, is space-separated with **no** timezone suffix (e.g. `2026-09-23 00:05:00`) — matching the exact wire shape the source uses for its own response `value.t` field. **This has been fixed in the connector**: you still supply `start_timestamp` as ISO-8601 in your table configuration; the connector converts it internally before it ever reaches the wire. The response `timestamp` column format is a separate, related fact: also space-separated with no timezone, but with millisecond precision (e.g. `"2026-09-22 20:38:02.545"`) — cast it with `TO_TIMESTAMP(timestamp, 'yyyy-MM-dd HH:mm:ss.SSS')`, not the ISO-8601 form.
-4. **The `attributes` column and the instance-discovery response shape (`hive_instances`) beyond the top-level `name` field remain unconfirmed.** The `Authorization` header form, by contrast, **is confirmed**: a live instance accepted both `Bearer <token>` and the bare token.
-5. **No delete tracking for any object.** The source exposes no delete endpoint and no tombstone field, so no table supports CDC with deletes. Removals can only be inferred by diffing successive `items` snapshots.
-6. **No documented rate limits.** The source declares no throttling responses, headers, or guidance. The connector retries conservatively with exponential backoff on throttling and gateway errors, but safe request rates must be established empirically for your deployment.
-7. **Attribute IDs have no published meaning.** The `attrib` option takes numeric IDs and the `attributes` column returns them verbatim. There is no ID-to-name registry in the API; obtain the mapping from your Apis administrator.
-8. **`interval`'s interaction with `aggregate` is unspecified.** The source does not state whether `interval` is ignored when `aggregate` is omitted. Set them together.
-9. **`items` cannot be read incrementally.** The catalog has no change cursor and no modified timestamp, so it is fully re-listed each run. The item pattern narrows scope but is not a cursor.
-10. **`values` cursors on wall-clock progress, not on observed record timestamps.** The endpoint returns one current value per item with no ordering guarantee and no upper time bound, so no reliable record-derived cursor exists. Re-reading a boundary row is harmless because the table upserts on `(instance, item_name)`.
-11. **No point-in-time historical lookup.** The source has no "value at this instant" endpoint. Retrieving one historical reading requires a `timeseries` request over a narrow window around the desired time.
-12. **JSON only.** The source also offers CSV, but defines no CSV schema, so the connector always requests JSON.
-13. **Read-only.** The source's write endpoint for pushing values into the historian is intentionally not used by this connector.
-14. **Instance runstate and module listings are not ingested.** They are health and configuration lookups rather than row-producing datasets.
+4. **`values`/`timeseries` reject wildcard item patterns — found and fixed via live testing.** The spec documents wildcard support (`Work*.Sig*`) for `item` on every endpoint, but live testing showed `values` and `timeseries` reject wildcards outright: a bare `*` fails with `"module * not found"`, and even a real module prefix like `ApisOT.*` fails with `"item ApisOT.* not found"`. Only `items` genuinely supports wildcards. **This has been fixed in the connector**: any wildcard `item` pattern given to `values`/`timeseries` is now transparently resolved to real, exact item names via one `items` lookup first, then batched into groups of `items_per_request` exact names per request (confirmed live that batching multiple exact names into a single request works, via the spec's own repeated-`item=`-params style — see `items_per_request` above). The real upper limit on batch size is unconfirmed; the default of `50` is a conservative placeholder pending further live testing at scale.
+5. **The `attributes` column and the instance-discovery response shape (`hive_instances`) beyond the top-level `name` field remain unconfirmed.** The `Authorization` header form, by contrast, **is confirmed**: a live instance accepted both `Bearer <token>` and the bare token.
+6. **No delete tracking for any object.** The source exposes no delete endpoint and no tombstone field, so no table supports CDC with deletes. Removals can only be inferred by diffing successive `items` snapshots.
+7. **No documented rate limits.** The source declares no throttling responses, headers, or guidance. The connector retries conservatively with exponential backoff on throttling and gateway errors, but safe request rates must be established empirically for your deployment.
+8. **Attribute IDs have no published meaning.** The `attrib` option takes numeric IDs and the `attributes` column returns them verbatim. There is no ID-to-name registry in the API; obtain the mapping from your Apis administrator.
+9. **`interval`'s interaction with `aggregate` is unspecified.** The source does not state whether `interval` is ignored when `aggregate` is omitted. Set them together.
+10. **`items` cannot be read incrementally.** The catalog has no change cursor and no modified timestamp, so it is fully re-listed each run. The item pattern narrows scope but is not a cursor.
+11. **`values` cursors on wall-clock progress, not on observed record timestamps.** The endpoint returns one current value per item with no ordering guarantee and no upper time bound, so no reliable record-derived cursor exists. Re-reading a boundary row is harmless because the table upserts on `(instance, item_name)`.
+12. **No point-in-time historical lookup.** The source has no "value at this instant" endpoint. Retrieving one historical reading requires a `timeseries` request over a narrow window around the desired time.
+13. **JSON only.** The source also offers CSV, but defines no CSV schema, so the connector always requests JSON.
+14. **Read-only.** The source's write endpoint for pushing values into the historian is intentionally not used by this connector.
+15. **Instance runstate and module listings are not ingested.** They are health and configuration lookups rather than row-producing datasets.
 
 ## References
 

@@ -763,11 +763,27 @@ def register_lakeflow_source(spark):
 
     #: ``item`` is a *required* query parameter on items/values/timeseries, so
     #: there is no "no filter" call. ``*`` is the spec's own wildcard syntax and
-    #: matches everything.
+    #: matches everything — for ``items``. CONFIRMED live (2026-09-23): despite
+    #: the spec's own documented wildcard support (``Work*.Sig*``), ``values``
+    #: and ``timeseries`` reject wildcard patterns outright — a bare ``*``
+    #: fails with ``"module * not found"``, and even a real module prefix like
+    #: ``ApisOT.*`` fails with ``"item ApisOT.* not found"``. Only ``items``
+    #: genuinely supports wildcards. See ``_resolve_exact_items`` in
+    #: ``apis.py``, which resolves any wildcard pattern to real item names via
+    #: ``items`` before it ever reaches ``values``/``timeseries``.
     DEFAULT_ITEM_PATTERN = "*"
 
     #: Format is always JSON — the spec defines no CSV schema.
     RESPONSE_FORMAT = "json"
+
+    #: How many exact item names ``values``/``timeseries`` requests batch into
+    #: one call via repeated ``item=`` params (the spec's own ``array``/
+    #: ``explode: true`` style). CONFIRMED live (2026-09-23) that batching
+    #: multiple exact names into one request works at all (tested with 2).
+    #: The real upper limit (URL length, server-side cap) is UNCONFIRMED — 50
+    #: is a conservative placeholder pending further live testing at scale.
+    #: Overridable per table via the ``items_per_request`` option.
+    DEFAULT_ITEMS_PER_REQUEST = 50
 
     #: Internal cursor/offset representation ONLY (checkpoints, ``_init_time``,
     #: ``_add_seconds`` arithmetic). Kept as clean ISO-8601 for readability and
@@ -1326,6 +1342,53 @@ def register_lakeflow_source(spark):
         # Endpoint readers
         # ------------------------------------------------------------------
 
+        def _resolve_exact_items(
+            self,
+            instance: str,
+            patterns: Sequence[str],
+            table_options: dict[str, str],
+        ) -> list[str]:
+            """Resolve ``item`` patterns to exact item names for ``values``/
+            ``timeseries``.
+
+            CONFIRMED live (2026-09-23): unlike ``items``, the ``values`` and
+            ``timeseries`` endpoints reject wildcard patterns outright — a bare
+            ``*`` fails with ``"module * not found"``, and even a real module
+            prefix like ``ApisOT.*`` fails with ``"item ApisOT.* not found"`` —
+            despite the spec's own documented wildcard support. Only ``items``
+            genuinely supports wildcards.
+
+            So: any pattern containing ``*`` is resolved to its real, exact
+            item names via one ``/items`` lookup (patterns without ``*`` are
+            already exact and pass through untouched, at no extra request
+            cost — the common case of pinning a specific item stays cheap).
+            All wildcard patterns are resolved in a single ``/items`` call,
+            mirroring ``_fetch_items``'s own multi-pattern style.
+            """
+            exact: list[str] = []
+            wildcard: list[str] = []
+            for pattern in patterns:
+                (wildcard if "*" in pattern else exact).append(pattern)
+
+            if wildcard:
+                payload = self._get_json(
+                    f"/hive/{instance}/items",
+                    {"item": wildcard, "format": RESPONSE_FORMAT},
+                )
+                exact.extend(
+                    record["item_name"]
+                    for record in _normalize_items(instance, payload)
+                    if record.get("item_name")
+                )
+
+            seen: set[str] = set()
+            out: list[str] = []
+            for name in exact:
+                if name not in seen:
+                    seen.add(name)
+                    out.append(name)
+            return out
+
         def _fetch_items(
             self,
             instance: str,
@@ -1351,19 +1414,44 @@ def register_lakeflow_source(spark):
             table_options: dict[str, str],
             updated_since: str | None,
         ) -> list[dict]:
-            """``GET /hive/{instance}/values`` — current value per item."""
-            params: dict[str, Any] = {
-                "item": list(patterns),
-                "format": RESPONSE_FORMAT,
-            }
-            if updated_since:
-                params["updatedSince"] = _to_wire_timestamp(updated_since)
-            quality = _resolve_quality(table_options)
-            if quality:
-                params["quality"] = quality
+            """``GET /hive/{instance}/values`` — current value per item.
 
-            payload = self._get_json(f"/hive/{instance}/values", params)
-            return _normalize_values(instance, payload)
+            Patterns are resolved to exact item names first (see
+            ``_resolve_exact_items`` — this endpoint rejects wildcards), then
+            batched into groups of ``items_per_request`` exact names per
+            request (CONFIRMED live: multiple exact names batch into one
+            request via repeated ``item=`` params; the real upper limit on
+            batch size is unconfirmed — see ``DEFAULT_ITEMS_PER_REQUEST``).
+
+            Local validation (``quality``) runs before ``_resolve_exact_items``,
+            which can itself make a network call for wildcard patterns — bad
+            options must fail before any request goes out, never after.
+            """
+            quality = _resolve_quality(table_options)
+            batch_size = _parse_int(
+                table_options.get("items_per_request"),
+                DEFAULT_ITEMS_PER_REQUEST,
+                minimum=1,
+            )
+
+            exact_items = self._resolve_exact_items(instance, patterns, table_options)
+            if not exact_items:
+                return []
+
+            records: list[dict] = []
+            for batch in _chunk(exact_items, batch_size):
+                params: dict[str, Any] = {
+                    "item": batch,
+                    "format": RESPONSE_FORMAT,
+                }
+                if updated_since:
+                    params["updatedSince"] = _to_wire_timestamp(updated_since)
+                if quality:
+                    params["quality"] = quality
+
+                payload = self._get_json(f"/hive/{instance}/values", params)
+                records.extend(_normalize_values(instance, payload))
+            return records
 
         def _fetch_timeseries(
             self,
@@ -1382,26 +1470,26 @@ def register_lakeflow_source(spark):
             windows. If live testing shows the server treats ``endtime`` as
             inclusive, boundary rows would duplicate and the windows should be
             shortened by one interval instead.
+
+            Patterns are resolved to exact item names first (see
+            ``_resolve_exact_items`` — this endpoint rejects wildcards, same as
+            ``values``), then batched into groups of ``items_per_request``.
+
+            Local validation (``quality``/``aggregate``/``interval``) runs
+            before ``_resolve_exact_items``, which can itself make a network
+            call for wildcard patterns — bad options must fail before any
+            request goes out, never after.
             """
-            params: dict[str, Any] = {
-                "item": list(patterns),
-                "starttime": _to_wire_timestamp(start_iso),
-                "endtime": _to_wire_timestamp(end_iso),
-                "format": RESPONSE_FORMAT,
-            }
             quality = _resolve_quality(table_options)
-            if quality:
-                params["quality"] = quality
 
             aggregate = (table_options.get("aggregate") or "").strip()
-            if aggregate:
-                if aggregate not in AGGREGATE_VALUES:
-                    raise ValueError(
-                        f"Unsupported 'aggregate' value {aggregate!r}. Must be one of "
-                        f"{sorted(AGGREGATE_VALUES)}"
-                    )
-                params["aggregate"] = aggregate
+            if aggregate and aggregate not in AGGREGATE_VALUES:
+                raise ValueError(
+                    f"Unsupported 'aggregate' value {aggregate!r}. Must be one of "
+                    f"{sorted(AGGREGATE_VALUES)}"
+                )
 
+            interval: int | None = None
             interval_raw = table_options.get("interval")
             if interval_raw not in (None, ""):
                 interval = _parse_int(interval_raw, MIN_INTERVAL_SECONDS, minimum=1)
@@ -1410,10 +1498,35 @@ def register_lakeflow_source(spark):
                         f"'interval' must be between {MIN_INTERVAL_SECONDS} and "
                         f"{MAX_INTERVAL_SECONDS} seconds, got {interval}"
                     )
-                params["interval"] = interval
 
-            payload = self._get_json(f"/hive/{instance}/timeseries", params)
-            return _normalize_timeseries(instance, payload)
+            batch_size = _parse_int(
+                table_options.get("items_per_request"),
+                DEFAULT_ITEMS_PER_REQUEST,
+                minimum=1,
+            )
+
+            exact_items = self._resolve_exact_items(instance, patterns, table_options)
+            if not exact_items:
+                return []
+
+            records: list[dict] = []
+            for batch in _chunk(exact_items, batch_size):
+                params: dict[str, Any] = {
+                    "item": batch,
+                    "starttime": _to_wire_timestamp(start_iso),
+                    "endtime": _to_wire_timestamp(end_iso),
+                    "format": RESPONSE_FORMAT,
+                }
+                if quality:
+                    params["quality"] = quality
+                if aggregate:
+                    params["aggregate"] = aggregate
+                if interval is not None:
+                    params["interval"] = interval
+
+                payload = self._get_json(f"/hive/{instance}/timeseries", params)
+                records.extend(_normalize_timeseries(instance, payload))
+            return records
 
         # ------------------------------------------------------------------
         # Instance resolution
@@ -1885,6 +1998,12 @@ def register_lakeflow_source(spark):
             if value and value not in out:
                 out.append(value)
         return out
+
+
+    def _chunk(items: Sequence[str], size: int) -> Iterator[list[str]]:
+        """Split ``items`` into consecutive batches of at most ``size``."""
+        for i in range(0, len(items), size):
+            yield list(items[i : i + size])
 
 
     def _first_str(entry: dict, keys: Sequence[str]) -> str | None:

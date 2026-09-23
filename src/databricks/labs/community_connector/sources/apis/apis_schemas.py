@@ -276,11 +276,27 @@ DEFAULT_AUTH_SCHEME = "Bearer"
 
 #: ``item`` is a *required* query parameter on items/values/timeseries, so
 #: there is no "no filter" call. ``*`` is the spec's own wildcard syntax and
-#: matches everything.
+#: matches everything — for ``items``. CONFIRMED live (2026-09-23): despite
+#: the spec's own documented wildcard support (``Work*.Sig*``), ``values``
+#: and ``timeseries`` reject wildcard patterns outright — a bare ``*``
+#: fails with ``"module * not found"``, and even a real module prefix like
+#: ``ApisOT.*`` fails with ``"item ApisOT.* not found"``. Only ``items``
+#: genuinely supports wildcards. See ``_resolve_exact_items`` in
+#: ``apis.py``, which resolves any wildcard pattern to real item names via
+#: ``items`` before it ever reaches ``values``/``timeseries``.
 DEFAULT_ITEM_PATTERN = "*"
 
 #: Format is always JSON — the spec defines no CSV schema.
 RESPONSE_FORMAT = "json"
+
+#: How many exact item names ``values``/``timeseries`` requests batch into
+#: one call via repeated ``item=`` params (the spec's own ``array``/
+#: ``explode: true`` style). CONFIRMED live (2026-09-23) that batching
+#: multiple exact names into one request works at all (tested with 2).
+#: The real upper limit (URL length, server-side cap) is UNCONFIRMED — 50
+#: is a conservative placeholder pending further live testing at scale.
+#: Overridable per table via the ``items_per_request`` option.
+DEFAULT_ITEMS_PER_REQUEST = 50
 
 #: Internal cursor/offset representation ONLY (checkpoints, ``_init_time``,
 #: ``_add_seconds`` arithmetic). Kept as clean ISO-8601 for readability and

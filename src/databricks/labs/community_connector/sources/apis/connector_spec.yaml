@@ -80,4 +80,4 @@ connection:
 # These options control per-table read behavior for the items, values,
 # and timeseries tables.
 # ============================================================================
-external_options_allowlist: "instance,instances,item,items,item_patterns,attrib,attribs,quality,aggregate,interval,start_timestamp,backfill_days,window_seconds,max_partitions,max_records_per_batch,max_windows_per_read"
+external_options_allowlist: "instance,instances,item,items,item_patterns,attrib,attribs,quality,aggregate,interval,start_timestamp,backfill_days,window_seconds,max_partitions,max_records_per_batch,max_windows_per_read,items_per_request"
